@@ -1,4 +1,13 @@
-
+/// Implementation is based on the blog post
+/// https://blog.logrocket.com/libp2p-tutorial-build-a-peer-to-peer-app-in-rust/
+///
+/// We’re going to build a cooking recipe app with a simple command-line interface that enables us to:
+/// - Create recipes
+/// - Publish recipes
+/// - List local recipes
+/// - List other peers we discovered on the network
+/// - List published recipes of a given peer
+/// - List all recipes of all peers we know
 use libp2p::{
     core::upgrade,
     floodsub::{Floodsub, FloodsubEvent, Topic},
@@ -17,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tokio::{fs, io::AsyncBufReadExt, sync::mpsc};
 
+/// We’ll start by defining some constants and types we’ll need:
 const STORAGE_FILE_PATH: &str = "./recipes.json";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
@@ -25,6 +35,7 @@ static KEYS: Lazy<identity::Keypair> = Lazy::new(|| identity::Keypair::generate_
 static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
 static TOPIC: Lazy<Topic> = Lazy::new(|| Topic::new("recipes"));
 
+/// We’ll also need some types for the recipe:
 type Recipes = Vec<Recipe>;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,6 +47,7 @@ struct Recipe {
     public: bool,
 }
 
+/// And some types for the messages we plan to send around:
 #[derive(Debug, Serialize, Deserialize)]
 enum ListMode {
     ALL,
@@ -59,10 +71,10 @@ enum EventType {
     Input(String),
 }
 
-
-
+/// Let’s start writing the main function to set up a peer within a peer-to-peer network.
 #[tokio::main]
 async fn main() {
+    /// We initialize logging and create an async channel to communicate between different parts of the application.
     pretty_env_logger::init();
 
     info!("Peer Id: {}", PEER_ID.clone());
@@ -72,12 +84,14 @@ async fn main() {
         .into_authentic(&KEYS)
         .expect("can create auth keys");
 
+    /// A transport is a set of network protocols that enables connection-oriented communication between peers.
     let transp = TokioTcpConfig::new()
         .upgrade(upgrade::Version::V1)
-        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
+        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated())
         .multiplex(mplex::MplexConfig::new())
         .boxed();
 
+    /// The next concept is a NetworkBehaviour. This is the part within libp2p that actually defines the logic of the network and all peers.
     let mut behaviour = RecipeBehaviour {
         floodsub: Floodsub::new(PEER_ID.clone()),
         mdns: Mdns::new(Default::default())
@@ -88,14 +102,20 @@ async fn main() {
 
     behaviour.floodsub.subscribe(TOPIC.clone());
 
+    /// A Swarm manages the connections created using the transport and executes the network behavior we created, triggering and receiving events and giving us a way to get to them from the outside.
+    ///
+    /// We create the Swarm with our transport, behavior, and peer ID. The executor part simply tells the Swarm to use the Tokio runtime to run internally, but we could also use other async runtimes here.
     let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
         .executor(Box::new(|fut| {
             tokio::spawn(fut);
         }))
         .build();
 
+    /// defined an async reader on STDIN, which reads the stream line by line.
+    /// So if we press enter, there will be a new incoming message.
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 
+    /// The only thing left to do is to start our Swarm
     Swarm::listen_on(
         &mut swarm,
         "/ip4/0.0.0.0/tcp/0"
@@ -104,6 +124,7 @@ async fn main() {
     )
     .expect("swarm can be started");
 
+    /// The next part is to create our event loop, which will listen to events from STDIN, from the Swarm, and from our response channel defined above.
     loop {
         let evt = {
             tokio::select! {
@@ -116,6 +137,17 @@ async fn main() {
             }
         };
 
+        /// Let's add some event handling logic:
+        ///
+        /// If there is an event, we match on it and see if it’s a Response or an Input event. Let’s look at the Input events only for now.
+        ///
+        /// There are a couple of options. We support the following commands:
+        /// ls p lists all known peers
+        /// ls r lists local recipes
+        /// ls r {peerId} lists published recipes from a certain peer
+        /// ls r all lists published recipes from all known peers
+        /// publish r {recipeId} publishes a given recipe
+        /// create r {recipeName}|{recipeIngredients}|{recipeInstructions creates a new recipe with the given data and an incrementing ID
         if let Some(event) = evt {
             match event {
                 EventType::Response(resp) => {
@@ -137,7 +169,8 @@ async fn main() {
     }
 }
 
-
+/// Helper function for listing the peer nodes.
+/// we can use mDNS to give us all discovered nodes, iterating and displaying them
 async fn handle_list_peers(swarm: &mut Swarm<RecipeBehaviour>) {
     info!("Discovered Peers:");
     let nodes = swarm.behaviour().mdns.discovered_nodes();
@@ -148,6 +181,7 @@ async fn handle_list_peers(swarm: &mut Swarm<RecipeBehaviour>) {
     unique_peers.iter().for_each(|p| info!("{}", p));
 }
 
+/// In the list command, there are three possible cases:
 async fn handle_list_recipes(cmd: &str, swarm: &mut Swarm<RecipeBehaviour>) {
     let rest = cmd.strip_prefix("ls r ");
     match rest {
@@ -183,6 +217,7 @@ async fn handle_list_recipes(cmd: &str, swarm: &mut Swarm<RecipeBehaviour>) {
     };
 }
 
+/// Helper function for creating recipes
 async fn handle_create_recipe(cmd: &str) {
     if let Some(rest) = cmd.strip_prefix("create r") {
         let elements: Vec<&str> = rest.split("|").collect();
@@ -199,6 +234,7 @@ async fn handle_create_recipe(cmd: &str) {
     }
 }
 
+/// Helper function for publishing recipes
 async fn handle_publish_recipe(cmd: &str) {
     if let Some(rest) = cmd.strip_prefix("publish r") {
         match rest.trim().parse::<usize>() {
@@ -214,7 +250,7 @@ async fn handle_publish_recipe(cmd: &str) {
     }
 }
 
-
+/// Responding to messages with libp2p:
 #[derive(NetworkBehaviour)]
 struct RecipeBehaviour {
     floodsub: Floodsub,
@@ -223,6 +259,7 @@ struct RecipeBehaviour {
     response_sender: mpsc::UnboundedSender<ListResponse>,
 }
 
+///  implement the inject_event function for both FloodsubEvent and MdnsEvent.
 impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour {
     fn inject_event(&mut self, event: FloodsubEvent) {
         match event {
