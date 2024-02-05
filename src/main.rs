@@ -102,9 +102,11 @@ async fn main() {
 
     behaviour.floodsub.subscribe(TOPIC.clone());
 
-    /// A Swarm manages the connections created using the transport and executes the network behavior we created, triggering and receiving events and giving us a way to get to them from the outside.
+    /// A Swarm manages the connections created using the transport and executes the network behavior we created, triggering and receiving events
+    /// and giving us a way to get to them from the outside.
     ///
-    /// We create the Swarm with our transport, behavior, and peer ID. The executor part simply tells the Swarm to use the Tokio runtime to run internally, but we could also use other async runtimes here.
+    /// We create the Swarm with our transport, behavior, and peer ID. The executor part simply tells the Swarm to use the Tokio runtime to run 
+    /// internally, but we could also use other async runtimes here.
     let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
         .executor(Box::new(|fut| {
             tokio::spawn(fut);
